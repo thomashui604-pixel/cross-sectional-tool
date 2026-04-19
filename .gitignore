@@ -1,0 +1,11 @@
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+run_app.bat
