@@ -309,3 +309,105 @@ def build_three_panel_chart(
 
     fig = apply_light_professional_theme(fig)
     return fig
+
+
+def build_regime_scatter(scorecard: list, corr_high: float = 0.6, corr_low: float = 0.4) -> go.Figure:
+    """
+    Scatter of each comparable in momentum × correlation space.
+    Quadrant shading indicates regime zones without imposing hard category boundaries.
+    Accepts the raw scorecard list from compute_signals (uses _mom and _corr private fields).
+    """
+    rows = [r for r in scorecard if r.get("_mom") is not None and r.get("_corr") is not None]
+
+    fig = go.Figure()
+
+    if not rows:
+        fig.update_layout(
+            xaxis=dict(title="Correlation", range=[-1, 1]),
+            yaxis=dict(title="Momentum"),
+            height=300,
+            paper_bgcolor="white",
+            plot_bgcolor="#F8F9FA",
+            margin=dict(l=50, r=20, t=20, b=40),
+        )
+        return fig
+
+    tickers = [r["Ticker"] for r in rows]
+    moms    = [r["_mom"]   for r in rows]
+    corrs   = [r["_corr"]  for r in rows]
+    setups  = [r["Setup"]  for r in rows]
+
+    mom_abs = max((abs(v) for v in moms), default=1.0) or 1.0
+    pad     = mom_abs * 0.30
+    y_min   = -(mom_abs + pad)
+    y_max   =  (mom_abs + pad)
+
+    SETUP_COLORS = {
+        "Trend Leader":               "#1a9641",
+        "Idiosyncratic Outperformer": "#00acc1",
+        "Momentum Long":              "#66c2a5",
+        "Convergence":                "#f46d43",
+        "Idiosyncratic Lag":          "#9e0142",
+        "Momentum Short":             "#d73027",
+        "Neutral":                    "#9e9e9e",
+        "—":                          "#cccccc",
+    }
+
+    # Quadrant background shading
+    shading = [
+        (-1,        corr_low,  0,     y_max,  "rgba(0,172,193,0.07)"),   # Idiosync. Outperformer
+        (corr_high, 1,         0,     y_max,  "rgba(26,150,65,0.07)"),    # Trend Leader
+        (corr_high, 1,         y_min, 0,      "rgba(244,109,67,0.07)"),   # Convergence
+        (-1,        corr_low,  y_min, 0,      "rgba(158,1,66,0.07)"),     # Idiosync. Lag
+    ]
+    for x0, x1, y0, y1, color in shading:
+        fig.add_shape(
+            type="rect", x0=x0, x1=x1, y0=y0, y1=y1,
+            fillcolor=color, line_width=0, layer="below",
+        )
+
+    # Reference lines
+    fig.add_hline(y=0,         line_color="#aaa", line_width=1, line_dash="solid")
+    fig.add_vline(x=corr_high, line_color="#bbb", line_width=1, line_dash="dot")
+    fig.add_vline(x=corr_low,  line_color="#bbb", line_width=1, line_dash="dot")
+
+    # One trace per point so each can have its own colour
+    for ticker, mom, corr, setup in zip(tickers, moms, corrs, setups):
+        color = SETUP_COLORS.get(setup, "#888888")
+        fig.add_trace(go.Scatter(
+            x=[corr], y=[mom],
+            mode="markers+text",
+            text=[ticker],
+            textposition="top center",
+            textfont=dict(size=11),
+            marker=dict(size=11, color=color, line=dict(color="white", width=1.5)),
+            showlegend=False,
+            hovertemplate=(
+                f"<b>{ticker}</b><br>"
+                f"Corr: {corr:.3f}<br>"
+                f"Mom: {mom:.3f}<br>"
+                f"Setup: {setup}<extra></extra>"
+            ),
+        ))
+
+    # Faint quadrant labels
+    label_y_top = y_max * 0.75
+    label_y_bot = y_min * 0.75
+    for x_c, lbl_top, lbl_bot in [
+        (0.80,  "Trend Leader",    "Convergence"),
+        (-0.70, "Idiosync. Out.",  "Idiosync. Lag"),
+    ]:
+        fig.add_annotation(x=x_c, y=label_y_top, text=lbl_top,
+                           showarrow=False, font=dict(size=9, color="#bbb"), xanchor="center")
+        fig.add_annotation(x=x_c, y=label_y_bot, text=lbl_bot,
+                           showarrow=False, font=dict(size=9, color="#bbb"), xanchor="center")
+
+    fig.update_layout(
+        xaxis=dict(title="Correlation", range=[-1, 1], gridcolor="#eee", zeroline=False),
+        yaxis=dict(title="Momentum", range=[y_min, y_max], gridcolor="#eee", zeroline=False),
+        paper_bgcolor="white",
+        plot_bgcolor="#F8F9FA",
+        height=320,
+        margin=dict(l=50, r=20, t=20, b=40),
+    )
+    return fig
