@@ -115,24 +115,72 @@ _SETUP_EMOJI = {
 }
 
 
+def _lerp(a, b, t):
+    """Linear interpolate two RGB tuples."""
+    t = max(0.0, min(1.0, t))
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def _css_diverging(v, vmin, vmax, neg=(239, 83, 80), pos=(38, 166, 154), zero=(255, 255, 255)):
+    """White at zero → neg_color at vmin, pos_color at vmax. Returns CSS background style."""
+    if v is None or pd.isna(v):
+        return ""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if v >= 0:
+        rgb = _lerp(zero, pos, v / max(vmax, 1e-9))
+    else:
+        rgb = _lerp(zero, neg, abs(v) / max(abs(vmin), 1e-9))
+    return f"background-color: rgb{rgb}; color: #000;"
+
+
 def _style_scorecard(df: pd.DataFrame):
-    """Apply colour gradients to the numeric scorecard columns."""
+    """
+    Colour-code numeric scorecard columns using inline CSS — no matplotlib required.
+    """
     styler = df.style.format(
         {"Momentum": "{:.3f}", "Mom %ile": "{:.0f}", "Correlation": "{:.3f}", "Vol Ratio": "{:.2f}"},
         na_rep="—",
     )
-    mom_vals = df["Momentum"].dropna() if "Momentum" in df.columns else pd.Series(dtype=float)
-    mom_abs  = float(mom_vals.abs().max()) if not mom_vals.empty else 1.0
-    mom_abs  = max(mom_abs, 0.01)
+
+    def col_css(col, fn):
+        return [fn(v) for v in col]
 
     if "Momentum" in df.columns:
-        styler = styler.background_gradient(subset=["Momentum"], cmap="RdYlGn", vmin=-mom_abs, vmax=mom_abs)
+        mom_vals = df["Momentum"].dropna()
+        mom_abs  = max(float(mom_vals.abs().max()) if not mom_vals.empty else 1.0, 0.01)
+        styler = styler.apply(
+            lambda c: col_css(c, lambda v: _css_diverging(v, -mom_abs, mom_abs)),
+            subset=["Momentum"],
+        )
+
     if "Mom %ile" in df.columns:
-        styler = styler.background_gradient(subset=["Mom %ile"], cmap="RdYlGn", vmin=0, vmax=100)
+        styler = styler.apply(
+            lambda c: col_css(c, lambda v: _css_diverging(
+                None if v is None or pd.isna(v) else float(v) - 50, -50, 50)),
+            subset=["Mom %ile"],
+        )
+
     if "Correlation" in df.columns:
-        styler = styler.background_gradient(subset=["Correlation"], cmap="coolwarm", vmin=-1, vmax=1)
+        # Blue (positive correlation) ↔ Orange (negative)
+        styler = styler.apply(
+            lambda c: col_css(c, lambda v: _css_diverging(
+                v, -1, 1, neg=(244, 165, 130), pos=(67, 147, 195))),
+            subset=["Correlation"],
+        )
+
     if "Vol Ratio" in df.columns:
-        styler = styler.background_gradient(subset=["Vol Ratio"], cmap="YlOrRd", vmin=0.5, vmax=2.0)
+        # Centred on 1.0; >1 (base richer) → orange, <1 (comp richer) → cyan
+        styler = styler.apply(
+            lambda c: col_css(c, lambda v: _css_diverging(
+                None if v is None or pd.isna(v) else float(v) - 1.0,
+                -0.5, 1.0,
+                neg=(0, 188, 212), pos=(244, 109, 67))),
+            subset=["Vol Ratio"],
+        )
+
     return styler
 
 
