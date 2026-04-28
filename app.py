@@ -115,7 +115,7 @@ _SETUP_EMOJI = {
 }
 
 
-def _style_scorecard(df: pd.DataFrame) -> pd.Styler:
+def _style_scorecard(df: pd.DataFrame):
     """Apply colour gradients to the numeric scorecard columns."""
     styler = df.style.format(
         {"Momentum": "{:.3f}", "Mom %ile": "{:.0f}", "Correlation": "{:.3f}", "Vol Ratio": "{:.2f}"},

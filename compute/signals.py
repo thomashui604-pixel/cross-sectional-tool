@@ -40,8 +40,11 @@ def _percentile_of(series: pd.Series, window: int = 252) -> float:
     current = _safe_iloc(s, -2)
     if current is None:
         return 50.0
-    start = max(-window - 1, -len(s))
-    history = s.iloc[start:-1]
+    # History = `window` bars BEFORE the current (-2) bar, exclusive of current.
+    # iloc[a:-2] excludes positions -2 and -1 — i.e. the current bar and any
+    # partial bar — so the comparison is purely backward-looking.
+    start = max(-window - 2, -len(s))
+    history = s.iloc[start:-2]
     if history.empty:
         return 50.0
     return float((history <= current).mean() * 100)
@@ -92,9 +95,11 @@ def _zero_cross_event(series: pd.Series, persistence: int = 3, lookback: int = 3
             post = signs[i: i + persistence]
             if len(post) == persistence and np.all(post == signs[i]):
                 direction = "positive" if signs[i] > 0 else "negative"
+                # bars_ago = distance from current completed bar (s.iloc[-1]) to the cross.
+                # 0 = cross occurred on the most recent completed bar.
                 return {
                     "event": f"Zero-cross → {direction}",
-                    "bars_ago": len(s) - i,
+                    "bars_ago": (len(s) - 1) - i,
                     "value": round(float(s.iloc[i]), 4),
                 }
     return None
@@ -143,7 +148,7 @@ def _corr_shift_event(
             if above[i] != above[i - 1]:
                 post = above[i: i + persistence]
                 if len(post) == persistence and np.all(post == above[i]):
-                    bars_ago = len(s) - i
+                    bars_ago = (len(s) - 1) - i
                     if bars_ago < best_bars_ago:
                         best_bars_ago = bars_ago
                         # For positive thresholds above[i] means corr just crossed up;
@@ -306,10 +311,12 @@ def compute_signals(
                 {"event": f"Breadth fell to minority ({breadth['count']}/{n})", "bars_ago": trend_window, "value": float(breadth["count"])},
             ))
 
-    # Assemble — collapse systemic events when ≥ systemic_threshold tickers fire the same type
+    # Assemble — collapse systemic events when ≥ systemic_threshold tickers fire the same type.
+    # Skip systemic collapse for baskets smaller than the threshold (a 2-ticker basket where both
+    # fire isn't meaningfully "systemic" — show them individually).
     all_events = []
     for event_type, ticker_events in events_by_type.items():
-        if len(ticker_events) >= min(systemic_threshold, max(n, 1)):
+        if n >= systemic_threshold and len(ticker_events) >= systemic_threshold:
             avg_val  = float(np.mean([e["value"] for _, e in ticker_events]))
             min_bars = min(e["bars_ago"] for _, e in ticker_events)
             all_events.append({
