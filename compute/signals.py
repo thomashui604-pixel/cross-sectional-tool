@@ -56,12 +56,17 @@ def _classify_setup(
     mom_pct: float,
     corr_high: float = 0.6,
     corr_low: float = 0.4,
-    neutral_half_band: float = 20.0,
+    neutral_half_band: float = 10.0,
+    crowded_pct: float = 90.0,
 ) -> str:
     """Classify setup type from momentum direction, correlation, and percentile."""
     if 50 - neutral_half_band <= mom_pct <= 50 + neutral_half_band:
         return "Neutral"
     if mom > 0:
+        # Crowded Leader = high momentum percentile + high correlation: leadership
+        # tape that moves with the crowd, more vulnerable to mean revert.
+        if mom_pct >= crowded_pct and corr >= corr_high:
+            return "Crowded Leader"
         if corr >= corr_high:
             return "Trend Leader"
         if corr <= corr_low:
@@ -73,6 +78,63 @@ def _classify_setup(
         if corr <= corr_low:
             return "Idiosyncratic Lag"
         return "Momentum Short"
+
+
+def _regime_metrics(series: pd.Series) -> dict:
+    """
+    Identify the currently-running directional momentum regime.
+
+    Returns:
+        {
+          "age": int|None,            # bars since last sign flip of completed bars
+          "peak_value": float|None,   # peak |momentum| within regime (signed)
+          "peak_bars_ago": int|None,  # bars since that peak
+        }
+        age is None when no flip is found within the available series (regime is
+        older than history, or the current sign is zero).
+    """
+    s = series.dropna().iloc[:-1]  # completed bars only
+    if len(s) < 2:
+        return {"age": None, "peak_value": None, "peak_bars_ago": None}
+    signs = np.sign(s.values)
+    last_sign = signs[-1]
+    age = None
+    if last_sign != 0:
+        for i in range(len(s) - 2, -1, -1):
+            if signs[i] != 0 and signs[i] != last_sign:
+                # Regime began at bar i+1 (first bar with the new sign).
+                age = (len(s) - 1) - (i + 1)
+                break
+    if age is not None:
+        seg = s.iloc[-(age + 1):]
+    else:
+        seg = s.iloc[-min(60, len(s)):]
+    if seg.empty:
+        return {"age": age, "peak_value": None, "peak_bars_ago": None}
+    peak_pos = int(seg.abs().values.argmax())
+    return {
+        "age": age,
+        "peak_value": float(seg.iloc[peak_pos]),
+        "peak_bars_ago": (len(seg) - 1) - peak_pos,
+    }
+
+
+def _stretch_sigma(series: pd.Series, window: int = 20) -> float:
+    """Current momentum / rolling std of momentum.  Sign preserved.
+
+    Magnitude = how many σ the signal sits from zero (i.e. how stretched);
+    sign = current direction (so positive = positive momentum)."""
+    s = series.dropna()
+    if len(s) < window + 2:
+        return None
+    current = _safe_iloc(s, -2)
+    if current is None:
+        return None
+    recent = s.iloc[-window - 2:-2]
+    sigma = float(recent.std())
+    if sigma == 0 or pd.isna(sigma):
+        return None
+    return current / sigma
 
 
 def _zero_cross_event(series: pd.Series, persistence: int = 3, lookback: int = 30):
@@ -197,6 +259,7 @@ def compute_signals(
     vol_dict: dict,
     mo_lookback: int = 20,
     pct_window: int = 252,
+    pct_window_short: int = 63,
     persistence_bars: int = 3,
     corr_high_thresh: float = 0.6,
     corr_low_thresh: float = 0.4,
@@ -246,9 +309,12 @@ def compute_signals(
 
         mom_val  = _safe_iloc(mom,  -2) if len(mom)  >= 2 else None
         corr_val = _safe_iloc(corr, -2) if len(corr) >= 2 else None
-        mom_pct  = _percentile_of(mom, pct_window)
+        mom_pct   = _percentile_of(mom, pct_window)
+        mom_pct_s = _percentile_of(mom, pct_window_short)
         mom_trend  = _trend_dir(mom,  trend_window)
         corr_trend = _trend_dir(corr, trend_window)
+        regime  = _regime_metrics(mom)
+        stretch = _stretch_sigma(mom)
 
         vol_ratio = None
         if len(base_vol) >= 2 and len(comp_vol) >= 2:
@@ -261,18 +327,30 @@ def compute_signals(
         if mom_val is not None and corr_val is not None:
             setup = _classify_setup(mom_val, corr_val, mom_pct, corr_high_thresh, corr_low_thresh)
 
+        if regime["age"] is not None and regime["peak_bars_ago"] is not None:
+            regime_str = f"{regime['age']}B (pk {regime['peak_bars_ago']}B)"
+        else:
+            regime_str = "—"
+
         scorecard.append({
             "Ticker":    t,
             "Momentum":  round(mom_val,  3) if mom_val  is not None else None,
-            "Mom %ile":  round(mom_pct,  0),
+            "%ile L":    round(mom_pct,    0),
+            "%ile S":    round(mom_pct_s,  0),
             "Trend":     mom_trend,
+            "Stretch σ": round(stretch, 2) if stretch is not None else None,
+            "Regime":    regime_str,
             "Correlation": round(corr_val, 3) if corr_val is not None else None,
             "Corr Trend":  corr_trend,
             "Vol Ratio":   vol_ratio,
             "Setup":       setup,
-            # Private — used by regime scatter, excluded from table display
+            # Private — used by regime scatter / headline, excluded from table display
             "_mom":  mom_val,
             "_corr": corr_val,
+            "_mom_pct": mom_pct,
+            "_mom_trend": mom_trend,
+            "_regime_age": regime["age"],
+            "_regime_peak_bars_ago": regime["peak_bars_ago"],
         })
 
     # ── Events ────────────────────────────────────────────────────────────────
@@ -335,8 +413,30 @@ def compute_signals(
                 })
 
     all_events.sort(key=lambda x: x["Bars Ago"])
+
+    # ── Headline ─────────────────────────────────────────────────────────────
+    # One short string per comparable, framed as "leading/lagging the base."
+    # Designed for the regime-check workflow (≤3 comparables) where breadth
+    # is meaningless but a one-line read of the tape is what you actually want.
+    headline = []
+    for row in scorecard:
+        mom_val = row.get("_mom")
+        if mom_val is None:
+            headline.append(f"{row['Ticker']}: insufficient data")
+            continue
+        direction = "leading" if mom_val > 0 else "lagging"
+        pct       = int(row["%ile L"]) if row["%ile L"] is not None else 50
+        trend     = row.get("_mom_trend", "→")
+        age       = row.get("_regime_age")
+        age_str   = f"{age}B" if age is not None else "≥series"
+        headline.append(
+            f"**{row['Ticker']}** {direction} {base_ticker} "
+            f"({pct}th %ile, {trend}, {age_str})"
+        )
+
     return {
         "breadth":   breadth,
         "scorecard": scorecard,
         "events":    all_events[:10],
+        "headline":  headline,
     }
