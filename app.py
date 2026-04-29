@@ -1,9 +1,11 @@
+import pandas as pd
 import streamlit as st
 from data.fetcher import fetch_data
 from compute.momentum import calculate_relative_momentum
 from compute.correlation import calculate_rolling_correlation
 from compute.volatility import calculate_historical_volatility
-from charts.builder import build_three_panel_chart
+from compute.signals import compute_signals
+from charts.builder import build_three_panel_chart, build_regime_scatter
 
 st.set_page_config(page_title="Cross-Sectional Momentum & Correlation Tool", layout="wide")
 
@@ -15,7 +17,6 @@ st.sidebar.caption("Equities: SPY, QQQ  |  Futures: ES=F, NQ=F, CL=F, GC=F")
 base_ticker = st.sidebar.text_input("Base Security", value="SPY").upper().strip()
 
 st.sidebar.subheader("Comparison Securities (Up to 12)")
-# Create a few default comparison tickers
 default_comps = ["QQQ", "IWM", "GLD"]
 comp_tickers = []
 for i in range(12):
@@ -76,17 +77,135 @@ corr_return_type = st.sidebar.radio(
 st.sidebar.header("Volatility Settings")
 vol_window = st.sidebar.slider("Vol Lookback (W)", min_value=5, max_value=100, value=20)
 
-# Application Logic
-# Use a button to avoid re-fetching data on every keystroke across the 12 ticker inputs
+st.sidebar.header("Signal Settings")
+with st.sidebar.expander("Configure Signals", expanded=False):
+    signal_persistence = st.slider(
+        "Confirm Bars",
+        min_value=2, max_value=5, value=3,
+        help="Bars a crossover or extreme must hold before it is flagged.",
+    )
+    signal_extremes_pct = st.slider(
+        "Extreme Threshold (%ile)",
+        min_value=80, max_value=95, value=90,
+        help="Momentum above this percentile = extreme high; below (100 − this) = extreme low.",
+    )
+    signal_corr_high = st.slider(
+        "Corr. High Zone",
+        min_value=0.40, max_value=0.90, value=0.60, step=0.05,
+        help="Correlation above this threshold = high-correlation regime.",
+    )
+    signal_corr_low = st.slider(
+        "Corr. Low Zone",
+        min_value=0.10, max_value=0.50, value=0.40, step=0.05,
+        help="Correlation below this threshold = idiosyncratic / low-correlation regime.",
+    )
+    signal_vol_ratio_high = st.slider("Vol Ratio High", min_value=1.2, max_value=2.5, value=1.5, step=0.1)
+    signal_vol_ratio_low  = st.slider("Vol Ratio Low",  min_value=0.40, max_value=0.80, value=0.67, step=0.01)
+
+# ── Setup type emoji map (display only) ───────────────────────────────────────
+_SETUP_EMOJI = {
+    "Base Leads (with tape)": "🟢 Base Leads (with tape)",
+    "Base Leads (Crowded)":   "🟢🔥 Base Leads (Crowded)",
+    "Base Leads (idio)":      "🔵 Base Leads (idio)",
+    "Base Leads (mild)":      "🟡 Base Leads (mild)",
+    "Base Lags (with tape)":  "🟠 Base Lags (with tape)",
+    "Base Lags (idio)":       "🔴 Base Lags (idio)",
+    "Base Lags (mild)":       "🔴 Base Lags (mild)",
+    "Neutral":                "⚪ Neutral",
+    "—":                      "—",
+}
+
+
+def _lerp(a, b, t):
+    """Linear interpolate two RGB tuples."""
+    t = max(0.0, min(1.0, t))
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+
+def _css_diverging(v, vmin, vmax, neg=(239, 83, 80), pos=(38, 166, 154), zero=(255, 255, 255)):
+    """White at zero → neg_color at vmin, pos_color at vmax. Returns CSS background style."""
+    if v is None or pd.isna(v):
+        return ""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if v >= 0:
+        rgb = _lerp(zero, pos, v / max(vmax, 1e-9))
+    else:
+        rgb = _lerp(zero, neg, abs(v) / max(abs(vmin), 1e-9))
+    return f"background-color: rgb{rgb}; color: #000;"
+
+
+def _style_scorecard(df: pd.DataFrame):
+    """
+    Colour-code numeric scorecard columns using inline CSS — no matplotlib required.
+    """
+    styler = df.style.format(
+        {
+            "Momentum":    "{:.3f}",
+            "%ile L":      "{:.0f}",
+            "%ile S":      "{:.0f}",
+            "Stretch σ":   "{:+.2f}",
+            "Correlation": "{:.3f}",
+            "Vol Ratio":   "{:.2f}",
+        },
+        na_rep="—",
+    )
+
+    def col_css(col, fn):
+        return [fn(v) for v in col]
+
+    if "Momentum" in df.columns:
+        mom_vals = df["Momentum"].dropna()
+        mom_abs  = max(float(mom_vals.abs().max()) if not mom_vals.empty else 1.0, 0.01)
+        styler = styler.apply(
+            lambda c: col_css(c, lambda v: _css_diverging(v, -mom_abs, mom_abs)),
+            subset=["Momentum"],
+        )
+
+    for pct_col in ("%ile L", "%ile S"):
+        if pct_col in df.columns:
+            styler = styler.apply(
+                lambda c: col_css(c, lambda v: _css_diverging(
+                    None if v is None or pd.isna(v) else float(v) - 50, -50, 50)),
+                subset=[pct_col],
+            )
+
+    if "Stretch σ" in df.columns:
+        styler = styler.apply(
+            lambda c: col_css(c, lambda v: _css_diverging(v, -3, 3)),
+            subset=["Stretch σ"],
+        )
+
+    if "Correlation" in df.columns:
+        # Blue (positive correlation) ↔ Orange (negative)
+        styler = styler.apply(
+            lambda c: col_css(c, lambda v: _css_diverging(
+                v, -1, 1, neg=(244, 165, 130), pos=(67, 147, 195))),
+            subset=["Correlation"],
+        )
+
+    if "Vol Ratio" in df.columns:
+        # Centred on 1.0; >1 (base richer) → orange, <1 (comp richer) → cyan
+        styler = styler.apply(
+            lambda c: col_css(c, lambda v: _css_diverging(
+                None if v is None or pd.isna(v) else float(v) - 1.0,
+                -0.5, 1.0,
+                neg=(0, 188, 212), pos=(244, 109, 67))),
+            subset=["Vol Ratio"],
+        )
+
+    return styler
+
+
+# ── Application Logic ──────────────────────────────────────────────────────────
 if st.button("Generate Chart", type="primary"):
     if interval == "1h" and timeframe in ["2y", "5y"]:
         st.warning("Note: Hourly data in yfinance is capped at roughly 730 days. Data may be truncated.")
 
     all_tickers = [base_ticker] + comp_tickers
 
-    # Warn when futures tickers are present: yfinance =F contracts are unadjusted front-month.
-    # TradingView uses back-adjusted continuous contracts, so historical prices differ —
-    # especially for energy futures (CL, NG) where roll gaps of 1-3% accumulate over months.
     futures_in_use = [t for t in all_tickers if t.endswith("=F")]
     if futures_in_use:
         st.info(
@@ -98,17 +217,14 @@ if st.button("Generate Chart", type="primary"):
 
     with st.spinner("Fetching data and calculating metrics..."):
         from datetime import timedelta
-        
-        # Calculate calendar days for the requested chart timeframe
+
         tf_days_map = {"1mo": 30, "3mo": 90, "6mo": 182, "1y": 365, "2y": 730, "5y": 1825}
-        chart_days = tf_days_map.get(timeframe, 365)
-        
-        # Map the requested timeframe to a padded fetch period to accommodate indicators
-        tf_padding = {"1mo": "3mo", "3mo": "6mo", "6mo": "1y", "1y": "2y", "2y": "5y", "5y": "10y"}
+        chart_days  = tf_days_map.get(timeframe, 365)
+
+        tf_padding  = {"1mo": "3mo", "3mo": "6mo", "6mo": "1y", "1y": "2y", "2y": "5y", "5y": "10y"}
         fetch_period = tf_padding.get(timeframe, "5y")
-        
+
         if interval == "1h":
-            # For 1h, max is 730d (approx 2y)
             fetch_period = "730d"
 
         data_dict = fetch_data(all_tickers, interval, fetch_period)
@@ -117,16 +233,16 @@ if st.button("Generate Chart", type="primary"):
             st.error(f"Failed to fetch data for the Base Security ({base_ticker}). Please check the ticker or timeframe.")
         else:
             base_prices = data_dict[base_ticker]['Close']
-            
-            # Determine the starting date of the chart from the most recently fetched datapoint.
-            # This is robust against stale datasets or weekends.
-            latest_ts = base_prices.index.max()
+
+            latest_ts      = base_prices.index.max()
             chart_start_ts = (latest_ts - timedelta(days=chart_days)).tz_localize(None)
 
-            momentum_dict = {}
-            corr_dict = {}
-            vol_dict = {}
-            
+            momentum_dict      = {}   # subsetted — for chart
+            momentum_full_dict = {}   # full series — for signal percentiles / event detection
+            corr_dict          = {}
+            corr_full_dict     = {}
+            vol_dict           = {}
+
             def subset_series(s):
                 try:
                     s_idx = s.index.tz_localize(None)
@@ -134,46 +250,37 @@ if st.button("Generate Chart", type="primary"):
                     s_idx = s.index
                 return s[s_idx >= chart_start_ts]
 
-            # Volatility for base ticker
-            vol_dict[base_ticker] = subset_series(calculate_historical_volatility(
-                base_prices, window=vol_window, interval=interval
-            ).dropna())
+            vol_dict[base_ticker] = subset_series(
+                calculate_historical_volatility(base_prices, window=vol_window, interval=interval).dropna()
+            )
 
             for comp_ticker in comp_tickers:
                 if comp_ticker in data_dict:
                     comp_prices = data_dict[comp_ticker]['Close']
 
-                    # Momentum
                     mom = calculate_relative_momentum(
-                        base_prices,
-                        comp_prices,
-                        lookback=mo_lookback,
-                        ema_span=mo_ema_span,
-                        vol_scaled=vol_scaled,
-                        vol_lookback=vol_lookback
+                        base_prices, comp_prices,
+                        lookback=mo_lookback, ema_span=mo_ema_span,
+                        vol_scaled=vol_scaled, vol_lookback=vol_lookback,
                     )
-                    momentum_dict[comp_ticker] = subset_series(mom.dropna())
+                    momentum_full_dict[comp_ticker] = mom.dropna()
+                    momentum_dict[comp_ticker]      = subset_series(mom.dropna())
 
-                    # Correlation
                     corr = calculate_rolling_correlation(
-                        base_prices,
-                        comp_prices,
-                        window=corr_window,
-                        return_interval=corr_return_interval,
+                        base_prices, comp_prices,
+                        window=corr_window, return_interval=corr_return_interval,
                         return_type=corr_return_type.lower(),
-                        base_ticker=base_ticker,
-                        comp_ticker=comp_ticker,
+                        base_ticker=base_ticker, comp_ticker=comp_ticker,
                     )
-                    corr_dict[comp_ticker] = subset_series(corr.dropna())
+                    corr_full_dict[comp_ticker] = corr.dropna()
+                    corr_dict[comp_ticker]      = subset_series(corr.dropna())
 
-                    # Volatility
-                    vol_dict[comp_ticker] = subset_series(calculate_historical_volatility(
-                        comp_prices, window=vol_window, interval=interval
-                    ).dropna())
+                    vol_dict[comp_ticker] = subset_series(
+                        calculate_historical_volatility(comp_prices, window=vol_window, interval=interval).dropna()
+                    )
                 else:
                     st.warning(f"Could not fetch data for {comp_ticker}. Skipping.")
 
-            # Subset data_dict for the chart candlestick/volume visualization
             chart_data_dict = {}
             for t, df in data_dict.items():
                 try:
@@ -182,8 +289,115 @@ if st.button("Generate Chart", type="primary"):
                     df_idx = df.index
                 chart_data_dict[t] = df[df_idx >= chart_start_ts]
 
-            # Build and show chart
-            fig = build_three_panel_chart(base_ticker, chart_data_dict, momentum_dict, corr_dict, vol_dict, interval,
-                                          overlay_enabled=overlay_enabled, overlay_scale=overlay_scale,
-                                          y_scale=y_scale)
+            # ── Signals & Scorecard ────────────────────────────────────────────
+            trend_window = max(3, mo_lookback // 4)
+            signals = compute_signals(
+                base_ticker=base_ticker,
+                comp_tickers=[t for t in comp_tickers if t in momentum_full_dict],
+                momentum_full_dict=momentum_full_dict,
+                corr_full_dict=corr_full_dict,
+                vol_dict=vol_dict,
+                mo_lookback=mo_lookback,
+                persistence_bars=signal_persistence,
+                corr_high_thresh=signal_corr_high,
+                corr_low_thresh=signal_corr_low,
+                vol_ratio_high=signal_vol_ratio_high,
+                vol_ratio_low=signal_vol_ratio_low,
+                extremes_pct_high=float(signal_extremes_pct),
+                extremes_pct_low=float(100 - signal_extremes_pct),
+            )
+
+            with st.expander("📊 Signals & Scorecard", expanded=True):
+                breadth = signals["breadth"]
+                n       = breadth["total"]
+                count   = breadth["count"]
+                trend   = breadth["trend"]
+
+                # ── Headline (always shown) ───────────────────────────────────
+                headline_lines = signals.get("headline", [])
+                if headline_lines:
+                    st.markdown("##### Regime read")
+                    st.markdown("  \n".join(f"• {line}" for line in headline_lines))
+
+                # ── Breadth (only meaningful for larger baskets) ──────────────
+                if n >= 4:
+                    ratio = count / n
+                    if ratio >= 2 / 3:
+                        breadth_label = "Broad Leadership"
+                        breadth_color = "🟢"
+                    elif ratio <= 1 / 3:
+                        breadth_label = "Broadly Lagging"
+                        breadth_color = "🔴"
+                    else:
+                        breadth_label = "Mixed / Transitional"
+                        breadth_color = "🟡"
+
+                    trend_arrow = "▲" if trend > 0 else ("▼" if trend < 0 else "→")
+                    delta_str   = f"{trend_arrow} {abs(trend)} vs {trend_window}B ago"
+
+                    bc1, bc2 = st.columns([1, 3])
+                    with bc1:
+                        st.metric(
+                            label=f"**{base_ticker}** beats",
+                            value=f"{count} / {n}",
+                            delta=delta_str,
+                        )
+                    with bc2:
+                        st.markdown(
+                            f"**{breadth_color} {breadth_label}**  \n"
+                            f"*>⅔ = broad leadership · <⅓ = broadly lagging · between = mixed*"
+                        )
+
+                st.divider()
+
+                # ── Scorecard table + Regime scatter ─────────────────────────
+                sc_col, reg_col = st.columns([1.4, 1])
+
+                with sc_col:
+                    st.subheader("Scorecard")
+                    scorecard = signals["scorecard"]
+                    if scorecard:
+                        sc_rows = [{k: v for k, v in row.items() if not k.startswith("_")} for row in scorecard]
+                        sc_df   = pd.DataFrame(sc_rows)
+                        if "Setup" in sc_df.columns:
+                            sc_df["Setup"] = sc_df["Setup"].map(lambda x: _SETUP_EMOJI.get(x, x))
+                        st.dataframe(_style_scorecard(sc_df), use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("No comparable data available.")
+
+                with reg_col:
+                    st.subheader("Regime Map")
+                    regime_fig = build_regime_scatter(
+                        signals["scorecard"],
+                        corr_high=signal_corr_high,
+                        corr_low=signal_corr_low,
+                    )
+                    st.plotly_chart(regime_fig, use_container_width=True, theme=None)
+
+                st.divider()
+
+                # ── Events log ────────────────────────────────────────────────
+                st.subheader("Extremes & Crossovers")
+                events = signals["events"]
+                if events:
+                    ev_df = pd.DataFrame(events)
+                    st.dataframe(ev_df, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No notable events detected in the current lookback window.")
+
+                st.caption(
+                    f"*Signals use the last completed bar (iloc[−2]) to avoid partial-bar distortion. "
+                    f"Crossovers require {signal_persistence} confirming bars. "
+                    f"Percentile windows: %ile L = 252 bars, %ile S = 63 bars. "
+                    f"Stretch σ = current momentum / 20-bar std (sigma-distance from zero — "
+                    f"higher magnitude = more extended). Regime = bars since last sign flip "
+                    f"(pk = bars since regime peak |momentum|). "
+                    f"Extremes threshold: {signal_extremes_pct}th / {100 - signal_extremes_pct}th pct.*"
+                )
+
+            # ── Chart ─────────────────────────────────────────────────────────
+            fig = build_three_panel_chart(
+                base_ticker, chart_data_dict, momentum_dict, corr_dict, vol_dict, interval,
+                overlay_enabled=overlay_enabled, overlay_scale=overlay_scale, y_scale=y_scale,
+            )
             st.plotly_chart(fig, use_container_width=True, theme=None)
