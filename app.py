@@ -104,15 +104,15 @@ with st.sidebar.expander("Configure Signals", expanded=False):
 
 # ── Setup type emoji map (display only) ───────────────────────────────────────
 _SETUP_EMOJI = {
-    "Trend Leader":               "🟢 Trend Leader",
-    "Crowded Leader":             "🟢🔥 Crowded Leader",
-    "Idiosyncratic Outperformer": "🔵 Idiosync. Outperformer",
-    "Momentum Long":              "🟡 Momentum Long",
-    "Convergence":                "🟠 Convergence",
-    "Idiosyncratic Lag":          "🔴 Idiosync. Lag",
-    "Momentum Short":             "🔴 Momentum Short",
-    "Neutral":                    "⚪ Neutral",
-    "—":                          "—",
+    "Base Leads (with tape)": "🟢 Base Leads (with tape)",
+    "Base Leads (Crowded)":   "🟢🔥 Base Leads (Crowded)",
+    "Base Leads (idio)":      "🔵 Base Leads (idio)",
+    "Base Leads (mild)":      "🟡 Base Leads (mild)",
+    "Base Lags (with tape)":  "🟠 Base Lags (with tape)",
+    "Base Lags (idio)":       "🔴 Base Lags (idio)",
+    "Base Lags (mild)":       "🔴 Base Lags (mild)",
+    "Neutral":                "⚪ Neutral",
+    "—":                      "—",
 }
 
 

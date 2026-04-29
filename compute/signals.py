@@ -60,24 +60,26 @@ def _classify_setup(
     crowded_pct: float = 90.0,
 ) -> str:
     """Classify setup type from momentum direction, correlation, and percentile."""
+    # Labels read from the BASE's perspective: "Base Leads / Lags" describes
+    # which side of the pair is winning, with the parenthetical qualifying how
+    # (with the tape = high corr; idio = low corr; mild = mid-range corr;
+    # crowded = leadership at extreme percentile + high corr, mean-revert risk).
     if 50 - neutral_half_band <= mom_pct <= 50 + neutral_half_band:
         return "Neutral"
     if mom > 0:
-        # Crowded Leader = high momentum percentile + high correlation: leadership
-        # tape that moves with the crowd, more vulnerable to mean revert.
         if mom_pct >= crowded_pct and corr >= corr_high:
-            return "Crowded Leader"
+            return "Base Leads (Crowded)"
         if corr >= corr_high:
-            return "Trend Leader"
+            return "Base Leads (with tape)"
         if corr <= corr_low:
-            return "Idiosyncratic Outperformer"
-        return "Momentum Long"
+            return "Base Leads (idio)"
+        return "Base Leads (mild)"
     else:
         if corr >= corr_high:
-            return "Convergence"
+            return "Base Lags (with tape)"
         if corr <= corr_low:
-            return "Idiosyncratic Lag"
-        return "Momentum Short"
+            return "Base Lags (idio)"
+        return "Base Lags (mild)"
 
 
 def _regime_metrics(series: pd.Series) -> dict:
@@ -415,22 +417,23 @@ def compute_signals(
     all_events.sort(key=lambda x: x["Bars Ago"])
 
     # ── Headline ─────────────────────────────────────────────────────────────
-    # One short string per comparable, framed as "leading/lagging the base."
+    # One short string per comparable, framed from the BASE's perspective.
+    # Positive momentum = base outperforming comparable (see compute/momentum.py:37).
     # Designed for the regime-check workflow (≤3 comparables) where breadth
     # is meaningless but a one-line read of the tape is what you actually want.
     headline = []
     for row in scorecard:
         mom_val = row.get("_mom")
         if mom_val is None:
-            headline.append(f"{row['Ticker']}: insufficient data")
+            headline.append(f"{base_ticker} vs {row['Ticker']}: insufficient data")
             continue
-        direction = "leading" if mom_val > 0 else "lagging"
+        direction = "outperforming" if mom_val > 0 else "underperforming"
         pct       = int(row["%ile L"]) if row["%ile L"] is not None else 50
         trend     = row.get("_mom_trend", "→")
         age       = row.get("_regime_age")
         age_str   = f"{age}B" if age is not None else "≥series"
         headline.append(
-            f"**{row['Ticker']}** {direction} {base_ticker} "
+            f"**{base_ticker}** {direction} **{row['Ticker']}** "
             f"({pct}th %ile, {trend}, {age_str})"
         )
 
