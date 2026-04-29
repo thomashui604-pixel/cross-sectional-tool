@@ -104,14 +104,15 @@ with st.sidebar.expander("Configure Signals", expanded=False):
 
 # ── Setup type emoji map (display only) ───────────────────────────────────────
 _SETUP_EMOJI = {
-    "Trend Leader":               "🟢 Trend Leader",
-    "Idiosyncratic Outperformer": "🔵 Idiosync. Outperformer",
-    "Momentum Long":              "🟡 Momentum Long",
-    "Convergence":                "🟠 Convergence",
-    "Idiosyncratic Lag":          "🔴 Idiosync. Lag",
-    "Momentum Short":             "🔴 Momentum Short",
-    "Neutral":                    "⚪ Neutral",
-    "—":                          "—",
+    "Base Leads (with tape)": "🟢 Base Leads (with tape)",
+    "Base Leads (Crowded)":   "🟢🔥 Base Leads (Crowded)",
+    "Base Leads (idio)":      "🔵 Base Leads (idio)",
+    "Base Leads (mild)":      "🟡 Base Leads (mild)",
+    "Base Lags (with tape)":  "🟠 Base Lags (with tape)",
+    "Base Lags (idio)":       "🔴 Base Lags (idio)",
+    "Base Lags (mild)":       "🔴 Base Lags (mild)",
+    "Neutral":                "⚪ Neutral",
+    "—":                      "—",
 }
 
 
@@ -141,7 +142,14 @@ def _style_scorecard(df: pd.DataFrame):
     Colour-code numeric scorecard columns using inline CSS — no matplotlib required.
     """
     styler = df.style.format(
-        {"Momentum": "{:.3f}", "Mom %ile": "{:.0f}", "Correlation": "{:.3f}", "Vol Ratio": "{:.2f}"},
+        {
+            "Momentum":    "{:.3f}",
+            "%ile L":      "{:.0f}",
+            "%ile S":      "{:.0f}",
+            "Stretch σ":   "{:+.2f}",
+            "Correlation": "{:.3f}",
+            "Vol Ratio":   "{:.2f}",
+        },
         na_rep="—",
     )
 
@@ -156,11 +164,18 @@ def _style_scorecard(df: pd.DataFrame):
             subset=["Momentum"],
         )
 
-    if "Mom %ile" in df.columns:
+    for pct_col in ("%ile L", "%ile S"):
+        if pct_col in df.columns:
+            styler = styler.apply(
+                lambda c: col_css(c, lambda v: _css_diverging(
+                    None if v is None or pd.isna(v) else float(v) - 50, -50, 50)),
+                subset=[pct_col],
+            )
+
+    if "Stretch σ" in df.columns:
         styler = styler.apply(
-            lambda c: col_css(c, lambda v: _css_diverging(
-                None if v is None or pd.isna(v) else float(v) - 50, -50, 50)),
-            subset=["Mom %ile"],
+            lambda c: col_css(c, lambda v: _css_diverging(v, -3, 3)),
+            subset=["Stretch σ"],
         )
 
     if "Correlation" in df.columns:
@@ -293,13 +308,19 @@ if st.button("Generate Chart", type="primary"):
             )
 
             with st.expander("📊 Signals & Scorecard", expanded=True):
-                # ── Breadth ───────────────────────────────────────────────────
                 breadth = signals["breadth"]
                 n       = breadth["total"]
                 count   = breadth["count"]
                 trend   = breadth["trend"]
 
-                if n > 0:
+                # ── Headline (always shown) ───────────────────────────────────
+                headline_lines = signals.get("headline", [])
+                if headline_lines:
+                    st.markdown("##### Regime read")
+                    st.markdown("  \n".join(f"• {line}" for line in headline_lines))
+
+                # ── Breadth (only meaningful for larger baskets) ──────────────
+                if n >= 4:
                     ratio = count / n
                     if ratio >= 2 / 3:
                         breadth_label = "Broad Leadership"
@@ -367,8 +388,11 @@ if st.button("Generate Chart", type="primary"):
                 st.caption(
                     f"*Signals use the last completed bar (iloc[−2]) to avoid partial-bar distortion. "
                     f"Crossovers require {signal_persistence} confirming bars. "
-                    f"Percentile window: 252 bars. Extremes threshold: {signal_extremes_pct}th / "
-                    f"{100 - signal_extremes_pct}th pct.*"
+                    f"Percentile windows: %ile L = 252 bars, %ile S = 63 bars. "
+                    f"Stretch σ = current momentum / 20-bar std (sigma-distance from zero — "
+                    f"higher magnitude = more extended). Regime = bars since last sign flip "
+                    f"(pk = bars since regime peak |momentum|). "
+                    f"Extremes threshold: {signal_extremes_pct}th / {100 - signal_extremes_pct}th pct.*"
                 )
 
             # ── Chart ─────────────────────────────────────────────────────────
